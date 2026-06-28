@@ -477,46 +477,53 @@ const App: React.FC = () => {
   const [isAdminLoading, setIsAdminLoading] = useState(false);
   const [selectedAdminUser, setSelectedAdminUser] = useState<UserProfile | null>(null);
 
+  const [adminError, setAdminError] = useState<string>('');
+
   const fetchAdminData = async () => {
     setIsAdminLoading(true);
+    setAdminError('');
+    const errors: string[] = [];
+
+    let usersList: UserProfile[] = [];
     try {
-      let usersList: UserProfile[] = [];
-      try {
-        const usersSnap = await getDocs(collection(db, 'users'));
-        usersSnap.forEach(d => {
-          usersList.push(d.data() as UserProfile);
-        });
-      } catch (err) {
-        handleFirestoreError(err, OperationType.GET, 'users');
-      }
-      setAdminUsers(usersList);
-
-      let projectsList: Project[] = [];
-      try {
-        const projectsSnap = await getDocs(collection(db, 'projects'));
-        projectsSnap.forEach(d => {
-          projectsList.push({ id: d.id, ...d.data() } as Project);
-        });
-      } catch (err) {
-        handleFirestoreError(err, OperationType.GET, 'projects');
-      }
-      setAdminProjects(projectsList);
-
-      let chatbotList: any[] = [];
-      try {
-        const chatbotSnap = await getDocs(collection(db, 'chatbot_usage'));
-        chatbotSnap.forEach(d => {
-          chatbotList.push({ id: d.id, ...d.data() });
-        });
-      } catch (err) {
-        handleFirestoreError(err, OperationType.GET, 'chatbot_usage');
-      }
-      setAdminChatbotUsage(chatbotList);
-    } catch (err) {
-      console.error("Error loading admin stats", err);
-    } finally {
-      setIsAdminLoading(false);
+      const usersSnap = await getDocs(collection(db, 'users'));
+      usersSnap.forEach(d => {
+        usersList.push(d.data() as UserProfile);
+      });
+    } catch (err: any) {
+      console.error('Failed to load users:', err);
+      errors.push(`Users: ${err.message || err}`);
     }
+    setAdminUsers(usersList);
+
+    let projectsList: Project[] = [];
+    try {
+      const projectsSnap = await getDocs(collection(db, 'projects'));
+      projectsSnap.forEach(d => {
+        projectsList.push({ id: d.id, ...d.data() } as Project);
+      });
+    } catch (err: any) {
+      console.error('Failed to load projects:', err);
+      errors.push(`Projects: ${err.message || err}`);
+    }
+    setAdminProjects(projectsList);
+
+    let chatbotList: any[] = [];
+    try {
+      const chatbotSnap = await getDocs(collection(db, 'chatbot_usage'));
+      chatbotSnap.forEach(d => {
+        chatbotList.push({ id: d.id, ...d.data() });
+      });
+    } catch (err: any) {
+      console.error('Failed to load chatbot_usage:', err);
+      errors.push(`Chatbot: ${err.message || err}`);
+    }
+    setAdminChatbotUsage(chatbotList);
+
+    if (errors.length > 0) {
+      setAdminError(errors.join(' | '));
+    }
+    setIsAdminLoading(false);
   };
 
   const handleToggleSubscription = async (userId: string, currentSub?: any) => {
@@ -2225,6 +2232,13 @@ const App: React.FC = () => {
         </header>
 
         <main className="z-10 w-full max-w-7xl px-6 py-10 flex flex-col gap-8 flex-1">
+          {adminError && (
+            <div className="bg-red-500/10 border border-red-500/20 rounded-2xl p-5 text-red-400 text-sm font-mono break-all">
+              <span className="font-bold block mb-1">Firestore Error:</span>
+              {adminError}
+            </div>
+          )}
+
           {isAdminLoading && adminUsers.length === 0 ? (
             <div className="flex-1 flex flex-col items-center justify-center py-24">
               <Loader2 className="w-10 h-10 animate-spin text-emerald-400 mb-4" />
