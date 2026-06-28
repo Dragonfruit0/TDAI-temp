@@ -9,6 +9,7 @@ export default defineConfig(({mode}) => {
     plugins: [react(), tailwindcss()],
     define: {
       'process.env.VITE_STRIPE_PUBLISHABLE_KEY': JSON.stringify(env.VITE_STRIPE_PUBLISHABLE_KEY),
+      'process.env.VITE_STRIPE_PAYMENT_LINK': JSON.stringify(env.VITE_STRIPE_PAYMENT_LINK),
     },
     resolve: {
       alias: {
