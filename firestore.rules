@@ -18,9 +18,8 @@ service cloud.firestore {
     
     // Check if the user is a systems administrator
     function isAdmin() {
-       return isAuthenticated() && 
-              request.auth.token.email == 'thedesignai3@gmail.com' && 
-              request.auth.token.email_verified == true;
+       return isAuthenticated() &&
+              request.auth.token.email == 'thedesignai3@gmail.com';
     }
     
     // Check if user owns the resource (for user-owned documents)
