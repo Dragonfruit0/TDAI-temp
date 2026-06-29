@@ -22,6 +22,11 @@ export default defineConfig(({mode}) => {
       // HMR is disabled in AI Studio via DISABLE_HMR env var.
       // Do not modify file watching is disabled to prevent flickering during agent edits.
       hmr: process.env.DISABLE_HMR !== 'true',
+      headers: {
+        // Allows Firebase signInWithPopup to communicate with the Google OAuth popup.
+        // Without this, COOP blocks window.closed polling on the cross-origin popup.
+        'Cross-Origin-Opener-Policy': 'same-origin-allow-popups',
+      },
     },
   };
 });

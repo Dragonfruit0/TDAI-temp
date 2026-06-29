@@ -39,6 +39,14 @@ const adminDb = getFirestore(firebaseConfig.firestoreDatabaseId);
 const app = express();
 const PORT = 3000;
 
+// Required for Firebase signInWithPopup: allows our page to communicate with
+// the Google OAuth popup window even though it is cross-origin.
+// Without this header the browser blocks window.closed checks on the popup.
+app.use((_req, res, next) => {
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin-allow-popups');
+  next();
+});
+
 // Lazy initialize Stripe instance to prevent backend crashes when secret key is unset on boot
 let stripeClient: Stripe | null = null;
 function getStripe(): Stripe {
