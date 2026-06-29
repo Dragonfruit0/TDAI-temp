@@ -8,8 +8,7 @@ import { UIPreview } from './components/UIPreview.tsx';
 import { OnboardingTutorial } from './components/OnboardingTutorial.tsx';
 import DottedGlowBackground from './components/DottedGlowBackground.tsx';
 import { UpgradeModal } from './components/UpgradeModal.tsx';
-import { auth, db, googleProvider, signInWithPopup, signOut, doc, setDoc, getDoc, collection, addDoc, query, where, getDocs, orderBy, handleFirestoreError, OperationType } from './firebase.ts';
-import { onAuthStateChanged } from 'firebase/auth';
+import { supabase } from './supabase.ts';
 
 const getAppliedColor = (classes: string, type: 'bg' | 'text' | 'border'): string => {
   const arr = classes.split(/\s+/);
@@ -247,17 +246,17 @@ const App: React.FC = () => {
     if (!currentUser) return;
     setIsLoadingLimits(true);
     try {
-      const q = query(collection(db, 'projects'), where('userId', '==', currentUser.uid));
-      const snap = await getDocs(q);
-      const projects: any[] = [];
-      snap.forEach(docSnap => {
-        projects.push(docSnap.data());
-      });
-      
-      const total = projects.length;
+      const { data: projects } = await supabase
+        .from('projects')
+        .select('id, created_at')
+        .eq('user_id', currentUser.uid);
+
+      const total = projects?.length || 0;
       const todayStr = new Date().toDateString();
-      const today = projects.filter(p => p.createdAt && new Date(p.createdAt).toDateString() === todayStr).length;
-      
+      const today = (projects || []).filter(
+        p => p.created_at && new Date(p.created_at).toDateString() === todayStr
+      ).length;
+
       setTotalGenerations(total);
       setGenerationsToday(today);
     } catch (err) {
@@ -282,51 +281,53 @@ const App: React.FC = () => {
   };
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
-      if (firebaseUser) {
-        try {
-          const userRef = doc(db, 'users', firebaseUser.uid);
-          const userSnap = await getDoc(userRef);
-          
-          const userDocData = userSnap.exists() ? userSnap.data() : {};
-          const userData: UserProfile = {
-            uid: firebaseUser.uid,
-            email: firebaseUser.email || '',
-            createdAt: userDocData.createdAt || new Date().toISOString(),
-            lastLoginAt: new Date().toISOString()
-          };
+    const { data: { subscription: authSub } } = supabase.auth.onAuthStateChange(
+      async (_event, session) => {
+        if (session?.user) {
+          const sbUser = session.user;
+          try {
+            const { data: existing } = await supabase
+              .from('users')
+              .select('*')
+              .eq('id', sbUser.id)
+              .single();
 
-          if (firebaseUser.displayName) {
-            userData.displayName = firebaseUser.displayName;
-          } else if (userDocData.displayName) {
-            userData.displayName = userDocData.displayName;
+            const upsertData = {
+              id: sbUser.id,
+              email: sbUser.email || '',
+              display_name: sbUser.user_metadata?.full_name || existing?.display_name || null,
+              photo_url: sbUser.user_metadata?.avatar_url || existing?.photo_url || null,
+              created_at: existing?.created_at || new Date().toISOString(),
+              last_login_at: new Date().toISOString(),
+            };
+
+            await supabase.from('users').upsert(upsertData);
+
+            const userData: UserProfile = {
+              uid: sbUser.id,
+              email: sbUser.email || '',
+              displayName: upsertData.display_name || undefined,
+              photoURL: upsertData.photo_url || undefined,
+              createdAt: upsertData.created_at,
+              lastLoginAt: upsertData.last_login_at,
+              subscription: existing?.subscription || undefined,
+            };
+
+            setUser(userData);
+            refreshLimits(userData);
+          } catch (error) {
+            console.error('Error syncing user profile:', error);
           }
-
-          if (firebaseUser.photoURL) {
-            userData.photoURL = firebaseUser.photoURL;
-          } else if (userDocData.photoURL) {
-            userData.photoURL = userDocData.photoURL;
-          }
-
-          if (userDocData.subscription) {
-            userData.subscription = userDocData.subscription;
-          }
-
-          await setDoc(userRef, userData, { merge: true });
-          setUser(userData);
-          refreshLimits(userData);
-        } catch (error) {
-          handleFirestoreError(error, OperationType.WRITE, `users/${firebaseUser.uid}`);
+        } else {
+          setUser(null);
+          setTotalGenerations(0);
+          setGenerationsToday(0);
         }
-      } else {
-        setUser(null);
-        setTotalGenerations(0);
-        setGenerationsToday(0);
+        setIsAuthReady(true);
       }
-      setIsAuthReady(true);
-    });
+    );
 
-    return () => unsubscribe();
+    return () => authSub.unsubscribe();
   }, []);
 
   // Track whether we returned from a successful Stripe checkout
@@ -347,21 +348,21 @@ const App: React.FC = () => {
   }, []);
 
   // After returning from Stripe checkout, re-fetch the user profile so the UI
-  // reflects whatever the server-side webhook wrote to Firestore.
+  // reflects whatever the server-side webhook wrote to the database.
   // We never write subscription status from the client.
   useEffect(() => {
     if (user && isAuthReady && checkoutJustSucceeded) {
       const refreshUserProfile = async () => {
         try {
-          const userRef = doc(db, 'users', user.uid);
-          const userSnap = await getDoc(userRef);
-          if (userSnap.exists()) {
-            const data = userSnap.data();
-            if (data.subscription) {
-              const updated = { ...user, subscription: data.subscription };
-              setUser(updated);
-              refreshLimits(updated);
-            }
+          const { data } = await supabase
+            .from('users')
+            .select('subscription')
+            .eq('id', user.uid)
+            .single();
+          if (data?.subscription) {
+            const updated = { ...user, subscription: data.subscription };
+            setUser(updated);
+            refreshLimits(updated);
           }
         } catch (err) {
           console.error("Failed to refresh user profile after checkout", err);
@@ -375,7 +376,10 @@ const App: React.FC = () => {
 
   const handleSignIn = async () => {
     try {
-      await signInWithPopup(auth, googleProvider);
+      await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: { redirectTo: window.location.origin },
+      });
     } catch (error) {
       console.error("Error signing in with Google", error);
     }
@@ -383,7 +387,7 @@ const App: React.FC = () => {
 
   const handleSignOut = async () => {
     try {
-      await signOut(auth);
+      await supabase.auth.signOut();
       setView(AppView.LANDING);
     } catch (error) {
       console.error("Error signing out", error);
@@ -394,17 +398,26 @@ const App: React.FC = () => {
     if (!user) return;
     setIsLoadingProjects(true);
     try {
-      const q = query(collection(db, 'projects'), where('userId', '==', user.uid));
-      const querySnapshot = await getDocs(q);
-      const projects: Project[] = [];
-      querySnapshot.forEach((doc) => {
-        projects.push({ id: doc.id, ...doc.data() } as Project);
-      });
-      // Sort by createdAt descending
-      projects.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      const { data, error } = await supabase
+        .from('projects')
+        .select('*')
+        .eq('user_id', user.uid)
+        .order('created_at', { ascending: false });
+      if (error) throw error;
+      const projects: Project[] = (data || []).map(p => ({
+        id: p.id,
+        userId: p.user_id,
+        prompt: p.prompt,
+        questions: p.questions,
+        answers: p.answers,
+        variants: p.variants,
+        createdAt: p.created_at,
+        usage: p.usage,
+        cost: p.cost,
+      }));
       setUserProjects(projects);
     } catch (error) {
-      handleFirestoreError(error, OperationType.GET, 'projects');
+      console.error('Error loading projects:', error);
     } finally {
       setIsLoadingProjects(false);
     }
@@ -421,14 +434,20 @@ const App: React.FC = () => {
     if (!user) return;
     setIsLoadingSavedDesigns(true);
     try {
-      const q = query(collection(db, 'saved_designs'), where('userId', '==', user.uid));
-      const querySnapshot = await getDocs(q);
-      const designs: SavedDesign[] = [];
-      querySnapshot.forEach((doc) => {
-        designs.push({ id: doc.id, ...doc.data() } as SavedDesign);
-      });
-      // Sort by createdAt descending
-      designs.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      const { data, error } = await supabase
+        .from('saved_designs')
+        .select('*')
+        .eq('user_id', user.uid)
+        .order('created_at', { ascending: false });
+      if (error) throw error;
+      const designs: SavedDesign[] = (data || []).map(d => ({
+        id: d.id,
+        userId: d.user_id,
+        name: d.name,
+        html: d.html,
+        parentPrompt: d.parent_prompt,
+        createdAt: d.created_at,
+      }));
       setUserSavedDesigns(designs);
     } catch (error) {
       console.error("Error loading saved designs", error);
@@ -445,14 +464,14 @@ const App: React.FC = () => {
     }
     setIsSavingDesign(true);
     try {
-      const designData: Omit<SavedDesign, 'id'> = {
-        userId: user.uid,
+        const { error } = await supabase.from('saved_designs').insert({
+        user_id: user.uid,
         name: saveDesignName.trim(),
         html: builderHtml,
-        parentPrompt: prompt || 'Custom Design Modification',
-        createdAt: new Date().toISOString()
-      };
-      await addDoc(collection(db, 'saved_designs'), designData);
+        parent_prompt: prompt || 'Custom Design Modification',
+        created_at: new Date().toISOString(),
+      });
+      if (error) throw error;
       alert("Design saved to your history successfully!");
       setSaveDesignName('');
       setShowSaveNamingModal(false);
@@ -489,49 +508,66 @@ const App: React.FC = () => {
 
     let usersList: UserProfile[] = [];
     try {
-      const usersSnap = await getDocs(collection(db, 'users'));
-      usersSnap.forEach(d => {
-        usersList.push(d.data() as UserProfile);
-      });
+      const { data, error } = await supabase.from('users').select('*');
+      if (error) throw error;
+      usersList = (data || []).map(u => ({
+        uid: u.id,
+        email: u.email,
+        displayName: u.display_name,
+        photoURL: u.photo_url,
+        createdAt: u.created_at,
+        lastLoginAt: u.last_login_at,
+        subscription: u.subscription,
+      }));
     } catch (err: any) {
-      console.error('Failed to load users:', err);
       errors.push(`Users: ${err.message || err}`);
     }
     setAdminUsers(usersList);
 
     let projectsList: Project[] = [];
     try {
-      const projectsSnap = await getDocs(collection(db, 'projects'));
-      projectsSnap.forEach(d => {
-        projectsList.push({ id: d.id, ...d.data() } as Project);
-      });
+      const { data, error } = await supabase.from('projects').select('*');
+      if (error) throw error;
+      projectsList = (data || []).map(p => ({
+        id: p.id,
+        userId: p.user_id,
+        prompt: p.prompt,
+        questions: p.questions,
+        answers: p.answers,
+        variants: p.variants,
+        createdAt: p.created_at,
+        usage: p.usage,
+        cost: p.cost,
+      }));
     } catch (err: any) {
-      console.error('Failed to load projects:', err);
       errors.push(`Projects: ${err.message || err}`);
     }
     setAdminProjects(projectsList);
 
     let chatbotList: any[] = [];
     try {
-      const chatbotSnap = await getDocs(collection(db, 'chatbot_usage'));
-      chatbotSnap.forEach(d => {
-        chatbotList.push({ id: d.id, ...d.data() });
-      });
+      const { data, error } = await supabase.from('chatbot_usage').select('*');
+      if (error) throw error;
+      chatbotList = (data || []).map(c => ({
+        id: c.id,
+        userId: c.user_id,
+        userEmail: c.user_email,
+        prompt: c.prompt,
+        usage: c.usage,
+        cost: c.cost,
+        createdAt: c.created_at,
+      }));
     } catch (err: any) {
-      console.error('Failed to load chatbot_usage:', err);
       errors.push(`Chatbot: ${err.message || err}`);
     }
     setAdminChatbotUsage(chatbotList);
 
-    if (errors.length > 0) {
-      setAdminError(errors.join(' | '));
-    }
+    if (errors.length > 0) setAdminError(errors.join(' | '));
     setIsAdminLoading(false);
   };
 
   const handleToggleSubscription = async (userId: string, currentSub?: any) => {
     try {
-      const userRef = doc(db, 'users', userId);
       const isCurrentlyActive = currentSub?.status === 'active';
       const newSub = {
         status: isCurrentlyActive ? 'inactive' : 'active',
@@ -539,13 +575,14 @@ const App: React.FC = () => {
         billingCycle: 'monthly',
         createdAt: new Date().toISOString()
       };
-      
-      try {
-        await setDoc(userRef, { subscription: newSub }, { merge: true });
-      } catch (err) {
-        handleFirestoreError(err, OperationType.UPDATE, `users/${userId}`);
-      }
-      
+
+      const res = await fetch('/api/admin/set-subscription', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId, subscription: newSub }),
+      });
+      if (!res.ok) throw new Error('Failed to update subscription');
+
       // Update local state instantly so user doesn't wait
       setAdminUsers(prev => prev.map(u => u.uid === userId ? { ...u, subscription: newSub } : u));
       if (selectedAdminUser?.uid === userId) {
@@ -834,20 +871,19 @@ const App: React.FC = () => {
       
       if (user) {
         try {
-          const projectData: Omit<Project, 'id'> = {
-            userId: user.uid,
+          await supabase.from('projects').insert({
+            user_id: user.uid,
             prompt,
             questions: [],
             answers: [],
             variants: generatedVariants,
-            createdAt: new Date().toISOString(),
+            created_at: new Date().toISOString(),
             usage,
-            cost
-          };
-          await addDoc(collection(db, 'projects'), projectData);
+            cost,
+          });
           await refreshLimits(user);
         } catch (dbError) {
-          handleFirestoreError(dbError, OperationType.CREATE, 'projects');
+          console.error('Failed to save project:', dbError);
         }
       }
 
@@ -1176,15 +1212,14 @@ const App: React.FC = () => {
 
       if (user) {
         try {
-          const logData = {
-            userId: user.uid,
-            userEmail: user.email,
+          await supabase.from('chatbot_usage').insert({
+            user_id: user.uid,
+            user_email: user.email,
             prompt: userMsg,
             usage,
             cost,
-            createdAt: new Date().toISOString()
-          };
-          await addDoc(collection(db, 'chatbot_usage'), logData);
+            created_at: new Date().toISOString(),
+          });
         } catch (dbError) {
           console.error("Failed to log chatbot token usage", dbError);
         }

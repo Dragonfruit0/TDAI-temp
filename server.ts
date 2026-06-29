@@ -1,8 +1,7 @@
 import express from 'express';
 import path from 'path';
 import Stripe from 'stripe';
-import { initializeApp, cert } from 'firebase-admin/app';
-import { getFirestore } from 'firebase-admin/firestore';
+import { createClient } from '@supabase/supabase-js';
 import { GoogleGenAI, Type } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
@@ -19,29 +18,19 @@ function validateEnv() {
 }
 validateEnv();
 
-import firebaseConfig from './firebase-applet-config.json' with { type: 'json' };
-
-if (process.env.FIREBASE_SERVICE_ACCOUNT) {
-  const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-  initializeApp({
-    credential: cert(serviceAccount),
-    projectId: firebaseConfig.projectId,
-  });
-} else {
-  initializeApp({
-    projectId: firebaseConfig.projectId,
-  });
-}
-
-// Target the specific dynamic firestore database ID
-const adminDb = getFirestore(firebaseConfig.firestoreDatabaseId);
+// Supabase admin client — uses service role key so it bypasses RLS
+const supabaseAdmin = createClient(
+  process.env.VITE_SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_ROLE_KEY!,
+  { auth: { autoRefreshToken: false, persistSession: false } }
+);
 
 const app = express();
 const PORT = 3000;
 
-// Required for Firebase signInWithPopup: allows our page to communicate with
-// the Google OAuth popup window even though it is cross-origin.
-// Without this header the browser blocks window.closed checks on the popup.
+// Supabase OAuth uses a redirect flow (not a popup), so COOP is a no-op here.
+// Kept as same-origin-allow-popups rather than same-origin so any future popup
+// integrations still work without header changes.
 app.use((_req, res, next) => {
   res.setHeader('Cross-Origin-Opener-Policy', 'same-origin-allow-popups');
   next();
@@ -86,20 +75,21 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
       
       if (userId) {
         console.log(`Stripe subscription checkout succeeded for user: ${userId}`);
-        const userRef = adminDb.collection('users').doc(userId);
-        
-        await userRef.set({
-          subscription: {
-            status: 'active',
-            plan: 'Pro',
-            billingCycle: 'monthly',
-            createdAt: new Date().toISOString(),
-            stripeSessionId: session.id,
-            stripeCustomerId: typeof session.customer === 'string' ? session.customer : session.customer?.id || null
-          }
-        }, { merge: true });
+        await supabaseAdmin
+          .from('users')
+          .update({
+            subscription: {
+              status: 'active',
+              plan: 'Pro',
+              billingCycle: 'monthly',
+              createdAt: new Date().toISOString(),
+              stripeSessionId: session.id,
+              stripeCustomerId: typeof session.customer === 'string' ? session.customer : session.customer?.id || null
+            }
+          })
+          .eq('id', userId);
 
-        console.log(`User ${userId} upgraded to Pro in Firestore successfully.`);
+        console.log(`User ${userId} upgraded to Pro in Supabase successfully.`);
       } else {
         console.warn('Missing client_reference_id (userId) in checkout session.');
       }
@@ -182,18 +172,40 @@ app.post('/api/stripe/create-checkout-session', async (req, res) => {
   }
 });
 
-// Sync endpoint to look up live Firebase/Stripe profile status
+// Sync endpoint to look up live Supabase/Stripe profile status
 app.get('/api/stripe/status/:userId', async (req, res) => {
   const { userId } = req.params;
   try {
-    const userDoc = await adminDb.collection('users').doc(userId).get();
-    if (!userDoc.exists) {
+    const { data, error } = await supabaseAdmin
+      .from('users')
+      .select('subscription')
+      .eq('id', userId)
+      .single();
+    if (error || !data) {
       res.json({ active: false, plan: 'Free' });
       return;
     }
-    const data = userDoc.data();
-    const isPro = data?.subscription?.status === 'active';
-    res.json({ active: isPro, subscription: data?.subscription || null });
+    const isPro = data.subscription?.status === 'active';
+    res.json({ active: isPro, subscription: data.subscription || null });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Admin endpoint — update a user's subscription (service role, no client can bypass)
+app.post('/api/admin/set-subscription', async (req, res) => {
+  const { userId, subscription } = req.body;
+  if (!userId || !subscription) {
+    res.status(400).json({ error: 'Missing userId or subscription' });
+    return;
+  }
+  try {
+    const { error } = await supabaseAdmin
+      .from('users')
+      .update({ subscription })
+      .eq('id', userId);
+    if (error) throw error;
+    res.json({ ok: true });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }

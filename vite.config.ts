@@ -10,6 +10,8 @@ export default defineConfig(({mode}) => {
     define: {
       'process.env.VITE_STRIPE_PUBLISHABLE_KEY': JSON.stringify(env.VITE_STRIPE_PUBLISHABLE_KEY),
       'process.env.VITE_STRIPE_PAYMENT_LINK': JSON.stringify(env.VITE_STRIPE_PAYMENT_LINK),
+      'import.meta.env.VITE_SUPABASE_URL': JSON.stringify(env.VITE_SUPABASE_URL),
+      'import.meta.env.VITE_SUPABASE_ANON_KEY': JSON.stringify(env.VITE_SUPABASE_ANON_KEY),
     },
     resolve: {
       alias: {
@@ -23,8 +25,8 @@ export default defineConfig(({mode}) => {
       // Do not modify file watching is disabled to prevent flickering during agent edits.
       hmr: process.env.DISABLE_HMR !== 'true',
       headers: {
-        // Allows Firebase signInWithPopup to communicate with the Google OAuth popup.
-        // Without this, COOP blocks window.closed polling on the cross-origin popup.
+        // Supabase OAuth is redirect-based so COOP is a no-op.
+        // Kept as same-origin-allow-popups to not break any future popup integrations.
         'Cross-Origin-Opener-Policy': 'same-origin-allow-popups',
       },
     },
