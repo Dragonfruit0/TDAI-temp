@@ -346,27 +346,30 @@ const App: React.FC = () => {
     }
   }, []);
 
-  // Auto-activate Pro after successful Stripe Payment Link return
+  // After returning from Stripe checkout, re-fetch the user profile so the UI
+  // reflects whatever the server-side webhook wrote to Firestore.
+  // We never write subscription status from the client.
   useEffect(() => {
     if (user && isAuthReady && checkoutJustSucceeded) {
-      const activatePro = async () => {
+      const refreshUserProfile = async () => {
         try {
-          const newSub = {
-            status: 'active',
-            plan: 'Pro',
-            billingCycle: 'monthly',
-            createdAt: new Date().toISOString(),
-          };
           const userRef = doc(db, 'users', user.uid);
-          await setDoc(userRef, { subscription: newSub }, { merge: true });
-          setUser({ ...user, subscription: newSub });
-          refreshLimits({ ...user, subscription: newSub });
-          setCheckoutJustSucceeded(false);
+          const userSnap = await getDoc(userRef);
+          if (userSnap.exists()) {
+            const data = userSnap.data();
+            if (data.subscription) {
+              const updated = { ...user, subscription: data.subscription };
+              setUser(updated);
+              refreshLimits(updated);
+            }
+          }
         } catch (err) {
-          console.error("Failed to activate Pro after checkout", err);
+          console.error("Failed to refresh user profile after checkout", err);
+        } finally {
+          setCheckoutJustSucceeded(false);
         }
       };
-      activatePro();
+      refreshUserProfile();
     }
   }, [user?.uid, isAuthReady, checkoutJustSucceeded]);
 

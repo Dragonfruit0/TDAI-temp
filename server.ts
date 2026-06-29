@@ -10,6 +10,15 @@ import dotenv from 'dotenv';
 // Load environment variables
 dotenv.config();
 
+function validateEnv() {
+  const required = ['STRIPE_WEBHOOK_SECRET'];
+  const missing = required.filter(k => !process.env[k]);
+  if (missing.length > 0) {
+    throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
+  }
+}
+validateEnv();
+
 import firebaseConfig from './firebase-applet-config.json' with { type: 'json' };
 
 if (process.env.FIREBASE_SERVICE_ACCOUNT) {
@@ -48,7 +57,8 @@ function getStripe(): Stripe {
 // Special raw body parser for Stripe secure signature verification
 app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
   const sig = req.headers['stripe-signature'];
-  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+  // Guaranteed non-null by validateEnv() at startup
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET as string;
 
   if (!sig) {
     res.status(400).send('Webhook Error: Missing Stripe Signature header.');
@@ -57,14 +67,7 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
 
   try {
     const stripe = getStripe();
-    let event: Stripe.Event;
-
-    if (webhookSecret) {
-      event = stripe.webhooks.constructEvent(req.body, sig as string, webhookSecret);
-    } else {
-      console.warn('Warning: STRIPE_WEBHOOK_SECRET is not configured. Webhook payload integrity is not verified.');
-      event = JSON.parse(req.body.toString());
-    }
+    const event = stripe.webhooks.constructEvent(req.body, sig as string, webhookSecret);
 
     console.log(`Received webhook event: ${event.type}`);
 
@@ -104,6 +107,27 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
 // JSON body parser for other normal API routes
 app.use(express.json());
 
+// Allowlisted origins for Stripe redirect URLs — populated from APP_URL env var
+// plus localhost for development.  Never trust a client-supplied URL.
+const ALLOWED_REDIRECT_ORIGINS = new Set<string>(
+  [process.env.APP_URL, 'http://localhost:3000']
+    .filter(Boolean)
+    .map(u => { try { return new URL(u!).origin; } catch { return ''; } })
+    .filter(Boolean)
+);
+
+function resolveRedirectBase(clientHint: string | undefined): string {
+  if (clientHint) {
+    try {
+      const origin = new URL(clientHint).origin;
+      if (ALLOWED_REDIRECT_ORIGINS.has(origin)) {
+        return origin;
+      }
+    } catch { /* ignore malformed URLs */ }
+  }
+  return process.env.APP_URL || 'http://localhost:3000';
+}
+
 // API route to create a checkout session
 app.post('/api/stripe/create-checkout-session', async (req, res) => {
   const { userId, userEmail, appUrl } = req.body;
@@ -115,9 +139,8 @@ app.post('/api/stripe/create-checkout-session', async (req, res) => {
 
   try {
     const stripe = getStripe();
-    
-    // Use user-provided app url or fallback to container configuration
-    const baseUrl = appUrl || process.env.APP_URL || 'http://localhost:3000';
+
+    const baseUrl = resolveRedirectBase(appUrl);
 
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
